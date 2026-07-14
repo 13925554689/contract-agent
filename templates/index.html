@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>合同生成与审核智能体</title>
+<style>
+:root { --pri: #1a73e8; --pri2: #1557b0; --bg: #f5f7fa; --card: #fff; --danger: #dc3545; --warn: #fd7e14; --ok: #28a745; --gray: #6c757d; --border: #e0e0e0; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: #333; line-height: 1.6; }
+.header { background: linear-gradient(135deg, var(--pri), var(--pri2)); color: #fff; padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 20px; font-weight: 600; }
+.header .sub { font-size: 13px; opacity: .85; }
+.tabs { display: flex; gap: 4px; padding: 12px 32px; background: #fff; border-bottom: 1px solid var(--border); }
+.tab { padding: 8px 20px; border: none; background: none; cursor: pointer; font-size: 14px; border-radius: 6px; color: #666; transition: .2s; }
+.tab:hover { background: #f0f4ff; }
+.tab.active { background: #e8f0fe; color: var(--pri); font-weight: 600; }
+.panel { display: none; padding: 24px 32px; max-width: 960px; margin: 0 auto; }
+.panel.active { display: block; }
+.card { background: var(--card); border-radius: 10px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.card h3 { font-size: 16px; margin-bottom: 16px; color: #333; }
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-size: 13px; font-weight: 600; color: #555; margin-bottom: 6px; }
+.form-group input, .form-group select, .form-group textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; transition: .2s; }
+.form-group input:focus, .form-group textarea:focus { outline: none; border-color: var(--pri); box-shadow: 0 0 0 3px rgba(26,115,232,.1); }
+.form-group textarea { min-height: 100px; resize: vertical; }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 24px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: .2s; }
+.btn-primary { background: var(--pri); color: #fff; }
+.btn-primary:hover { background: var(--pri2); }
+.btn-outline { background: #fff; color: var(--pri); border: 1px solid var(--pri); }
+.btn-outline:hover { background: #f0f4ff; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-sm { padding: 6px 14px; font-size: 13px; }
+.upload-zone { border: 2px dashed var(--border); border-radius: 10px; padding: 32px; text-align: center; cursor: pointer; transition: .2s; }
+.upload-zone:hover, .upload-zone.dragover { border-color: var(--pri); background: #f8faff; }
+.upload-zone .icon { font-size: 36px; margin-bottom: 8px; }
+.upload-zone p { color: #999; font-size: 13px; }
+.row { display: flex; gap: 16px; }
+.row > * { flex: 1; }
+@media (max-width: 640px) { .row { flex-direction: column; } }
+
+.risk-bar { display: flex; gap: 16px; margin: 16px 0; }
+.risk-stat { text-align: center; padding: 12px 20px; border-radius: 8px; background: #f8f9fa; }
+.risk-stat .num { font-size: 28px; font-weight: 700; }
+.risk-stat .lbl { font-size: 12px; color: #888; margin-top: 4px; }
+.risk-stat.high .num { color: var(--danger); }
+.risk-stat.mid .num { color: var(--warn); }
+.risk-stat.low .num { color: var(--ok); }
+.risk-item { border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; border-left: 4px solid var(--gray); }
+.risk-item.level-高风险 { border-left-color: var(--danger); background: #fff5f5; }
+.risk-item.level-中风险 { border-left-color: var(--warn); background: #fff8f0; }
+.risk-item.level-低风险 { border-left-color: var(--ok); background: #f0fff4; }
+.risk-item.level-提示 { border-left-color: var(--gray); background: #f8f9fa; }
+.risk-item .rname { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+.risk-item .rdesc { font-size: 13px; color: #666; }
+.risk-item .rsug { font-size: 13px; color: var(--pri); margin-top: 6px; padding: 6px 0; border-top: 1px dashed #eee; }
+.reg-card { border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; margin-bottom: 8px; }
+.reg-card .rtitle { font-weight: 600; color: var(--pri); }
+.reg-card .rtags { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; background: #e8f0fe; color: var(--pri); }
+.tag.warn { background: #fff3cd; color: #856404; }
+
+.suggestions { background: #f8f9fa; border-radius: 8px; padding: 16px; }
+.suggestions li { margin-bottom: 8px; font-size: 14px; }
+
+.result { display: none; }
+.result.show { display: block; }
+
+.loading { text-align: center; padding: 32px; display: none; }
+.loading.show { display: block; }
+.spinner { width: 36px; height: 36px; border: 3px solid var(--border); border-top-color: var(--pri); border-radius: 50%; animation: spin .8s linear infinite; margin: 0 auto 12px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.msg { padding: 12px 16px; border-radius: 8px; margin: 12px 0; font-size: 14px; display: none; }
+.msg.show { display: block; }
+.msg.success { background: #d4edda; color: #155724; }
+.msg.error { background: #f8d7da; color: #721c24; }
+
+.overall-risk { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 20px; font-weight: 600; font-size: 15px; }
+.overall-risk.high { background: #ffe0e0; color: var(--danger); }
+.overall-risk.mid { background: #fff3cd; color: var(--warn); }
+.overall-risk.low { background: #d4edda; color: var(--ok); }
+
+.gen-result { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 24px; white-space: pre-wrap; font-size: 14px; line-height: 1.8; max-height: 500px; overflow-y: auto; margin: 12px 0; }
+
+.contract-preview { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 24px; font-size: 14px; line-height: 1.8; font-family: "SimSun", serif; }
+.contract-preview h2, .contract-preview h3 { font-family: -apple-system, sans-serif; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>📋 合同生成与审核智能体</h1>
+    <div class="sub">AI驱动的合同全生命周期管理</div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:12px;opacity:.8" id="status">初始化中...</div>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('review')">🔍 合同审核</button>
+  <button class="tab" onclick="switchTab('generate')">✍️ 合同生成</button>
+  <button class="tab" onclick="switchTab('regulations')">📚 法规库</button>
+</div>
+
+<div class="panel active" id="panel-review">
+  <div class="card">
+    <h3>上传合同文件</h3>
+    <div class="row">
+      <div style="flex:2">
+        <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+          <div class="icon">📄</div>
+          <p><strong>点击选择文件</strong> 或拖拽到此处</p>
+          <p style="font-size:12px;margin-top:4px">支持 PDF / DOCX / TXT 格式，最大16MB</p>
+        </div>
+        <input type="file" id="fileInput" accept=".pdf,.docx,.doc,.txt" style="display:none" onchange="onFileSelected(event)">
+        <div id="fileName" style="margin-top:8px;font-size:13px;color:var(--ok);display:none"></div>
+      </div>
+      <div style="flex:1">
+        <div class="form-group">
+          <label>行业领域</label>
+          <select id="industry">
+            {% for ind in industries %}
+            <option value="{{ ind }}">{{ ind }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="reviewContract()" style="width:100%">
+          🔍 开始审核
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="loading" id="reviewLoading"><div class="spinner"></div><p>AI正在分析合同...</p></div>
+  <div class="msg" id="reviewMsg"></div>
+
+  <div class="result" id="reviewResult">
+    <div class="card">
+      <h3 style="display:flex;justify-content:space-between;align-items:center">
+        审核报告
+        <span class="overall-risk" id="overallRisk"></span>
+      </h3>
+      <div id="contractMeta" style="font-size:13px;color:#888;margin-bottom:12px"></div>
+      <div class="risk-bar" id="riskBar"></div>
+    </div>
+    <div class="card"><h3>风险详情</h3><div id="riskList"></div></div>
+    <div class="card"><h3>修改建议</h3><div id="suggestions"></div></div>
+    <div class="card"><h3>相关法规</h3><div id="relatedRegs"></div></div>
+    <div class="card">
+      <button class="btn btn-outline btn-sm" onclick="exportReport()">📥 导出报告</button>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="panel-generate">
+  <div class="card">
+    <h3>合同需求</h3>
+    <div class="row">
+      <div class="form-group">
+        <label>合同类型</label>
+        <select id="genType">
+          {% for ct in contract_types %}
+          <option value="{{ ct }}">{{ ct }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>甲方（我方）</label>
+        <input type="text" id="genBuyer" placeholder="例如：XX科技有限公司">
+      </div>
+      <div class="form-group">
+        <label>乙方（对方）</label>
+        <input type="text" id="genSeller" placeholder="例如：YY信息技术有限公司">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>需求描述（越详细越好）</label>
+      <textarea id="genReq" placeholder="例如：采购100台服务器，要求3年维保，付款方式为预付30%+验收60%+质保期满10%，交货期30天..."></textarea>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="generateContract()">✍️ 生成合同</button>
+      <button class="btn btn-outline" onclick="generateContract(true)">📥 生成并下载DOCX</button>
+    </div>
+  </div>
+
+  <div class="loading" id="genLoading"><div class="spinner"></div><p>AI正在起草合同...</p></div>
+  <div class="msg" id="genMsg"></div>
+  <div class="result" id="genResult">
+    <div class="card">
+      <h3 style="display:flex;justify-content:space-between">
+        生成的合同
+        <button class="btn btn-outline btn-sm" onclick="copyGenText()">📋 复制全文</button>
+      </h3>
+      <div class="contract-preview" id="genText"></div>
+      <div style="font-size:12px;color:var(--gray);margin-top:8px">⚠️ 免责声明：本合同时由AI生成仅供参考，正式签署前请由执业律师审核。</div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="panel-regulations">
+  <div class="card">
+    <h3>法规检索</h3>
+    <div style="display:flex;gap:8px">
+      <input type="text" id="regSearch" placeholder="输入关键词搜索法规... 如：违约金、劳动合同、数据安全" style="flex:1"
+             onkeydown="if(event.key==='Enter')searchRegs()">
+      <button class="btn btn-primary" onclick="searchRegs()">🔍 搜索</button>
+      <button class="btn btn-outline btn-sm" onclick="refreshRegs()">🔄 刷新</button>
+    </div>
+  </div>
+  <div class="loading" id="regLoading"><div class="spinner"></div><p>检索中...</p></div>
+  <div class="msg" id="regMsg"></div>
+  <div id="regResults"></div>
+</div>
+
+<script>
+function escapeHtml(str) {
+  if (str == null) return '';
+  const div = document.createElement('div');
+  div.textContent = String(str);
+  return div.innerHTML;
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.textContent.includes(
+    name==='review'?'审核':name==='generate'?'生成':'法规')));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+}
+
+function onFileSelected(e) {
+  const f = e.target.files[0];
+  if (f) {
+    document.getElementById('fileName').style.display = 'block';
+    document.getElementById('fileName').textContent = '✅ ' + f.name + ' (' + formatSize(f.size) + ')';
+  }
+}
+
+const dz = document.getElementById('dropZone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('dragover'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('dragover');
+  const f = e.dataTransfer.files[0];
+  if (f) {
+    document.getElementById('fileInput').files = e.dataTransfer.files;
+    onFileSelected({target:{files:[f]}});
+  }
+});
+
+async function reviewContract() {
+  const file = document.getElementById('fileInput').files[0];
+  if (!file) return showMsg('reviewMsg','error','请先选择合同文件');
+
+  showLoading('reviewLoading', true);
+  hideResult('reviewResult');
+  hideMsg('reviewMsg');
+
+  const form = new FormData();
+  form.append('file', file);
+  form.append('industry', document.getElementById('industry').value);
+
+  try {
+    const resp = await fetch('/api/review', {method:'POST', body:form});
+    const data = await resp.json();
+    showLoading('reviewLoading', false);
+
+    if (!resp.ok) throw new Error(data.error || '审核失败');
+    renderReport(data.report);
+    showResult('reviewResult');
+    showMsg('reviewMsg','success','✅ 审核完成 | 分析方式: ' + data.report.analyzed_by);
+  } catch(e) {
+    showLoading('reviewLoading', false);
+    showMsg('reviewMsg','error','❌ ' + e.message);
+  }
+}
+
+function renderReport(report) {
+  const info = report.contract_info;
+  const metaEl = document.getElementById('contractMeta');
+  metaEl.textContent = '';
+  const parts = [];
+  if (info.title) parts.push('📋 ' + info.title);
+  if (info.party_a) parts.push('甲方: ' + info.party_a);
+  if (info.party_b) parts.push('乙方: ' + info.party_b);
+  if (info.contract_amount) parts.push('金额: ' + info.contract_amount);
+  metaEl.textContent = parts.join(' | ');
+
+  const risk = report.overall_risk;
+  const cls = risk==='高风险'?'high':risk==='中风险'?'mid':'low';
+  const overallEl = document.getElementById('overallRisk');
+  overallEl.className = 'overall-risk ' + cls;
+  overallEl.textContent = '🛡️ 综合风险: ' + risk;
+
+  const s = report.risk_summary;
+  const riskBarEl = document.getElementById('riskBar');
+  riskBarEl.innerHTML =
+    '<div class="risk-stat high"><div class="num">'+Number(s.high)+'</div><div class="lbl">高风险</div></div>' +
+    '<div class="risk-stat mid"><div class="num">'+Number(s.mid)+'</div><div class="lbl">中风险</div></div>' +
+    '<div class="risk-stat low"><div class="num">'+Number(s.low)+'</div><div class="lbl">低风险</div></div>' +
+    '<div class="risk-stat"><div class="num">'+Number(s.tip)+'</div><div class="lbl">提示</div></div>';
+
+  const riskListEl = document.getElementById('riskList');
+  riskListEl.innerHTML = '';
+  if (report.risks && report.risks.length > 0) {
+    report.risks.forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'risk-item level-' + r.level;
+      const nameEl = document.createElement('div');
+      nameEl.className = 'rname';
+      nameEl.textContent = r.level + ' | ' + r.name + ' (' + r.source + ')';
+      div.appendChild(nameEl);
+      const descEl = document.createElement('div');
+      descEl.className = 'rdesc';
+      descEl.textContent = r.description;
+      div.appendChild(descEl);
+      if (r.suggestion) {
+        const sugEl = document.createElement('div');
+        sugEl.className = 'rsug';
+        sugEl.textContent = '💡 ' + r.suggestion;
+        div.appendChild(sugEl);
+      }
+      if (r.clause_context) {
+        const ctxEl = document.createElement('div');
+        ctxEl.style.cssText = 'font-size:12px;color:#999;margin-top:4px';
+        ctxEl.textContent = '📄 相关条款: ' + r.clause_context.substring(0, 150) + '...';
+        div.appendChild(ctxEl);
+      }
+      riskListEl.appendChild(div);
+    });
+  } else {
+    riskListEl.innerHTML = '<p style="color:#999">未发现明显风险点</p>';
+  }
+
+  const sugEl = document.getElementById('suggestions');
+  sugEl.innerHTML = '';
+  if (report.suggestions && report.suggestions.length > 0) {
+    const ul = document.createElement('ul');
+    ul.className = 'suggestions';
+    report.suggestions.forEach(s => {
+      const li = document.createElement('li');
+      li.textContent = s;
+      ul.appendChild(li);
+    });
+    sugEl.appendChild(ul);
+  } else {
+    sugEl.innerHTML = '<p style="color:#999">暂无修改建议</p>';
+  }
+
+  const regsEl = document.getElementById('relatedRegs');
+  regsEl.innerHTML = '';
+  if (report.related_regulations && report.related_regulations.length > 0) {
+    report.related_regulations.forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'reg-card';
+      const titleEl = document.createElement('div');
+      titleEl.className = 'rtitle';
+      titleEl.textContent = r.title;
+      div.appendChild(titleEl);
+      const snippetEl = document.createElement('div');
+      snippetEl.style.cssText = 'font-size:12px;color:#888';
+      snippetEl.textContent = (r.snippet || r.content || '').substring(0, 200);
+      div.appendChild(snippetEl);
+      if (r.tags && r.tags.length) {
+        const tagsEl = document.createElement('div');
+        tagsEl.className = 'rtags';
+        r.tags.forEach(t => {
+          const span = document.createElement('span');
+          span.className = 'tag';
+          span.textContent = t;
+          tagsEl.appendChild(span);
+        });
+        div.appendChild(tagsEl);
+      }
+      regsEl.appendChild(div);
+    });
+  } else {
+    regsEl.innerHTML = '<p style="color:#999">未找到相关法规</p>';
+  }
+}
+
+async function generateContract(exportDocx=false) {
+  const type = document.getElementById('genType').value;
+  const req = document.getElementById('genReq').value;
+  if (!req) return showMsg('genMsg','error','请输入合同需求描述');
+
+  showLoading('genLoading', true);
+  hideResult('genResult');
+  hideMsg('genMsg');
+
+  try {
+    const resp = await fetch('/api/generate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        type, requirements: req,
+        buyer: document.getElementById('genBuyer').value,
+        seller: document.getElementById('genSeller').value,
+        export: exportDocx
+      })
+    });
+    const data = await resp.json();
+    showLoading('genLoading', false);
+
+    if (!resp.ok) throw new Error(data.error || '生成失败');
+    document.getElementById('genText').textContent = data.generated_text;
+    showResult('genResult');
+    showMsg('genMsg','success','✅ 合同已生成 ('+data.word_count+'字)' +
+      (data.docx_path ? ' | DOCX已导出' : ''));
+  } catch(e) {
+    showLoading('genLoading', false);
+    showMsg('genMsg','error','❌ ' + e.message);
+  }
+}
+
+function copyGenText() {
+  const text = document.getElementById('genText').textContent;
+  navigator.clipboard.writeText(text).then(() => alert('已复制到剪贴板'));
+}
+
+async function searchRegs() {
+  const q = document.getElementById('regSearch').value;
+  if (!q) return;
+  showLoading('regLoading', true);
+
+  try {
+    const resp = await fetch('/api/regulations/search?q='+encodeURIComponent(q));
+    const data = await resp.json();
+    showLoading('regLoading', false);
+    const container = document.getElementById('regResults');
+    container.innerHTML = '';
+    if (data.results && data.results.length > 0) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const h3 = document.createElement('h3');
+      h3.textContent = '搜索结果 (' + data.count + '条)';
+      card.appendChild(h3);
+      data.results.forEach(r => {
+        const div = document.createElement('div');
+        div.className = 'reg-card';
+        const titleEl = document.createElement('div');
+        titleEl.className = 'rtitle';
+        titleEl.textContent = r.title + ' (' + r.category + ')';
+        div.appendChild(titleEl);
+        const snippetEl = document.createElement('div');
+        snippetEl.style.cssText = 'font-size:13px;color:#666;margin:6px 0';
+        snippetEl.textContent = (r.snippet || r.content || '').substring(0, 300);
+        div.appendChild(snippetEl);
+        if (r.tags && r.tags.length) {
+          const tagsEl = document.createElement('div');
+          tagsEl.className = 'rtags';
+          r.tags.forEach(t => {
+            const span = document.createElement('span');
+            span.className = 'tag';
+            span.textContent = t;
+            tagsEl.appendChild(span);
+          });
+          div.appendChild(tagsEl);
+        }
+        card.appendChild(div);
+      });
+      container.appendChild(card);
+    } else {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const p = document.createElement('p');
+      p.style.color = '#999';
+      p.textContent = '未找到相关法规，尝试其他关键词';
+      card.appendChild(p);
+      container.appendChild(card);
+    }
+  } catch(e) {
+    showLoading('regLoading', false);
+    showMsg('regMsg','error','搜索失败: '+e.message);
+  }
+}
+
+async function refreshRegs() {
+  try {
+    const resp = await fetch('/api/regulations/refresh', {method:'POST'});
+    const data = await resp.json();
+    showMsg('regMsg','success','✅ 法规库已刷新，共'+data.reg_count+'条');
+  } catch(e) { showMsg('regMsg','error','刷新失败'); }
+}
+
+function exportReport() {
+  const content = [];
+  content.push(document.getElementById('contractMeta').innerText);
+  document.querySelectorAll('#reviewResult .risk-item').forEach(el => content.push(el.innerText));
+  const blob = new Blob([content.join('\n\n')], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = '合同审核报告.txt';
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function showLoading(id, s) { document.getElementById(id).classList.toggle('show', s); }
+function showResult(id) { document.getElementById(id).classList.add('show'); }
+function hideResult(id) { document.getElementById(id).classList.remove('show'); }
+function showMsg(id, cls, text) {
+  const el = document.getElementById(id);
+  el.className = 'msg '+cls+' show';
+  el.textContent = text;
+}
+function hideMsg(id) { document.getElementById(id).classList.remove('show'); }
+function formatSize(b) { return b < 1024 ? b+'B' : b < 1048576 ? (b/1024).toFixed(1)+'KB' : (b/1048576).toFixed(1)+'MB'; }
+
+fetch('/api/health').then(r=>r.json()).then(d=>{
+  document.getElementById('status').textContent =
+    '📊 法规库: '+d.reg_count+'条 | 🤖 LLM: '+(d.llm_configured?'已配置':'仅规则引擎');
+});
+</script>
+</body>
+</html>
