@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>合同生成与审核智能体</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
 <style>
 :root { --pri: #1a73e8; --pri2: #1557b0; --bg: #f5f7fa; --card: #fff; --danger: #dc3545; --warn: #fd7e14; --ok: #28a745; --gray: #6c757d; --border: #e0e0e0; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -179,9 +180,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
       <label>需求描述（越详细越好）</label>
       <textarea id="genReq" placeholder="例如：采购100台服务器，要求3年维保，付款方式为预付30%+验收60%+质保期满10%，交货期30天..."></textarea>
     </div>
-    <div style="display:flex;gap:8px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn btn-primary" onclick="generateContract()">✍️ 生成合同</button>
       <button class="btn btn-outline" onclick="generateContract(true)">📥 生成并下载DOCX</button>
+      <button class="btn btn-outline" onclick="generateAndReview()">🔄 生成并自动审核(闭环)</button>
     </div>
   </div>
 
@@ -194,6 +196,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
         <button class="btn btn-outline btn-sm" onclick="copyGenText()">📋 复制全文</button>
       </h3>
       <div class="contract-preview" id="genText"></div>
+      <div id="genHistory" style="margin-top:12px"></div>
       <div style="font-size:12px;color:var(--gray);margin-top:8px">⚠️ 免责声明：本合同时由AI生成仅供参考，正式签署前请由执业律师审核。</div>
     </div>
   </div>
@@ -404,9 +407,67 @@ async function generateContract(exportDocx=false) {
 
     if (!resp.ok) throw new Error(data.error || '生成失败');
     document.getElementById('genText').textContent = data.generated_text;
+    document.getElementById('genHistory').innerHTML = '';
     showResult('genResult');
-    showMsg('genMsg','success','✅ 合同已生成 ('+data.word_count+'字)' +
-      (data.docx_path ? ' | DOCX已导出' : ''));
+    let msg = '✅ 合同已生成 ('+data.word_count+'字)';
+    if (exportDocx && data.docx_path) {
+      const fname = String(data.docx_path).split(/[\\/]/).pop();
+      const a = document.createElement('a');
+      a.href = '/api/download/' + encodeURIComponent(fname);
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      msg += ' | 📥 DOCX已下载';
+    }
+    showMsg('genMsg','success',msg);
+  } catch(e) {
+    showLoading('genLoading', false);
+    showMsg('genMsg','error','❌ ' + e.message);
+  }
+}
+
+async function generateAndReview() {
+  const type = document.getElementById('genType').value;
+  const req = document.getElementById('genReq').value;
+  if (!req) return showMsg('genMsg','error','请输入合同需求描述');
+
+  showLoading('genLoading', true);
+  hideResult('genResult');
+  hideMsg('genMsg');
+
+  try {
+    const resp = await fetch('/api/generate-and-review', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        type, requirements: req,
+        buyer: document.getElementById('genBuyer').value,
+        seller: document.getElementById('genSeller').value,
+        export: false
+      })
+    });
+    const data = await resp.json();
+    showLoading('genLoading', false);
+
+    if (!resp.ok) throw new Error(data.error || '闭环生成失败');
+    document.getElementById('genText').textContent = data.generated_text;
+    const histEl = document.getElementById('genHistory');
+    histEl.innerHTML = '';
+    if (data.history && data.history.length > 1) {
+      const h3 = document.createElement('h4');
+      h3.style.margin = '10px 0 6px';
+      h3.textContent = '🔄 迭代历程 (' + data.iterations + '轮)';
+      histEl.appendChild(h3);
+      data.history.forEach(h => {
+        const s = h.risk_summary || {};
+        const div = document.createElement('div');
+        div.style.cssText = 'font-size:12px;color:#666;background:#f8f9fa;border-radius:6px;padding:6px 10px;margin:4px 0';
+        div.textContent = `第${h.iteration}轮 · ${h.word_count}字 · 综合${h.overall_risk} · 高${s.high||0}/中${s.mid||0}/低${s.low||0}/提示${s.tip||0}`;
+        histEl.appendChild(div);
+      });
+    }
+    showResult('genResult');
+    showMsg('genMsg','success','✅ 闭环完成 ('+data.iterations+'轮, '+data.word_count+'字) 风险已自动修正');
   } catch(e) {
     showLoading('genLoading', false);
     showMsg('genMsg','error','❌ ' + e.message);

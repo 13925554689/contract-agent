@@ -7,6 +7,37 @@ import os
 from datetime import datetime
 from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 
+_CHECKLIST_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "avoidance_checklist.txt")
+
+
+def _load_checklist() -> str:
+    try:
+        if os.path.exists(_CHECKLIST_PATH):
+            return open(_CHECKLIST_PATH, encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+    return ""
+
+
+def _append_checklist(text: str):
+    if not text.strip():
+        return
+    try:
+        os.makedirs(os.path.dirname(_CHECKLIST_PATH), exist_ok=True)
+        existing = set()
+        if os.path.exists(_CHECKLIST_PATH):
+            existing = {line.strip() for line in open(_CHECKLIST_PATH, encoding="utf-8").readlines() if line.strip()}
+        new_lines = [l.strip() for l in text.split("\n") if l.strip() and l.strip() not in existing]
+        if new_lines:
+            with open(_CHECKLIST_PATH, "a", encoding="utf-8") as f:
+                f.write("\n".join(new_lines) + "\n")
+    except OSError:
+        pass
+
+
+# ponytail: public alias so app.py doesn't import a private fn
+append_checklist = _append_checklist
+
 _CONTRACT_PROMPTS = {
     "采购合同": """你是合同起草专家。请根据以下要求起草一份采购合同。
 
@@ -109,7 +140,9 @@ def _sanitize_format_input(text):
 
 
 def generate_contract(contract_type: str, requirements: str,
-                      buyer: str = "", seller: str = "") -> dict:
+                      buyer: str = "", seller: str = "",
+                      review_feedback: str = "",
+                      load_checklist: bool = True) -> dict:
     if contract_type not in _CONTRACT_PROMPTS:
         return {"error": f"不支持的合同类型: {contract_type}", "supported": list(_CONTRACT_PROMPTS.keys())}
 
@@ -123,6 +156,16 @@ def generate_contract(contract_type: str, requirements: str,
         seller=safe_seller
     )
     prompt = prompt.replace('{{', '{').replace('}}', '}')
+
+    # ponytail: inject accumulated avoidance checklist + review feedback
+    if load_checklist:
+        checklist = _load_checklist()
+        if checklist:
+            prompt += "\n\n【历史避坑规则 — 请严格遵守，避免以下已知问题】\n" + checklist
+    if review_feedback:
+        prompt += "\n" + review_feedback
+    # 强制把需求中的具体数字直接填入条款，禁止留空白待填
+    prompt += "\n\n【硬性要求】需求描述中出现的具体数字（金额、期限、数量、比例、天数等）必须直接写入对应条款，不得留空白或提示用户自行填写。"
 
     if not LLM_API_KEY:
         fallback = _fallback_template(contract_type, buyer, seller)
@@ -143,7 +186,8 @@ def generate_contract(contract_type: str, requirements: str,
         "contract_type": contract_type,
         "generated_text": text,
         "word_count": len(text),
-        "disclaimer": "本合同时由AI生成，仅供参考，正式签署前请由专业律师审核。"
+        "disclaimer": "本合同时由AI生成，仅供参考，正式签署前请由专业律师审核。",
+        "llm_available": True
     }
 
 

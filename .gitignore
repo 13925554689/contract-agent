@@ -5,5 +5,7 @@ __pycache__/
 .arts/
 .codeartsdoer/
 data/regulations.db
+data/avoidance_checklist.txt
 uploads/*.docx
 uploads/*.txt
+node_modules/

@@ -11,7 +11,8 @@ from config import UPLOAD_DIR, INDUSTRIES, CONTRACT_TYPES
 from engine.reg_db import init_db, seed_regulations, search_regulations, list_regulations
 from engine.parser import parse_contract
 from engine.analyzer import analyze_risks
-from engine.generator import generate_contract, export_docx
+from engine.generator import generate_contract, export_docx, append_checklist
+from engine.feedback_pipeline import extract_feedback, build_feedback_prompt, build_avoidance_checklist
 
 ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.doc', '.txt'}
 ALLOWED_MIME_PREFIXES = {
@@ -38,6 +39,36 @@ def _is_safe_filename(filename):
 def _allowed_file(filename):
     ext = os.path.splitext(filename)[1].lower()
     return ext in ALLOWED_EXTENSIONS
+
+
+# ponytail: text→clauses helper for in-memory generated text (no file needed)
+def _text_to_clauses(text: str) -> list:
+    """将生成的合同文本拆分为条款列表，复用 parser._classify_clause"""
+    from engine.parser import _classify_clause, _clean_text
+    text = _clean_text(text)
+    clauses = []
+    # 按常见条款标识拆分
+    pattern = r'(?:(?:第[一二三四五六七八九十百千0-9]+[条節节章]|(?:一|二|三|四|五|六|七|八|九|十)[、，,.])\s*|(?:^|\n)\s*\d+[\.、．]\s+)'
+    parts = re.split(pattern, text)
+    if len(parts) <= 2:
+        paras = [p.strip() for p in text.split('\n\n') if len(p.strip()) > 10]
+        for i, para in enumerate(paras):
+            clauses.append({
+                "index": i + 1, "type": _classify_clause(para),
+                "content": para[:1000], "word_count": len(para)
+            })
+    else:
+        clause_idx = 0
+        for part in parts:
+            part = part.strip()
+            if len(part) < 10:
+                continue
+            clause_idx += 1
+            clauses.append({
+                "index": clause_idx, "type": _classify_clause(part),
+                "content": part[:1000], "word_count": len(part)
+            })
+    return clauses
 
 
 @app.route('/')
@@ -117,20 +148,103 @@ def gen_contract():
     return jsonify({"success": True, **result})
 
 
+@app.route('/api/generate-and-review', methods=['POST'])
+def generate_and_review():
+    """闭环管道：生成→审核→反馈→重新生成（最多2轮迭代）
+
+    ponytail: 整个闭环 ~70行，无新依赖，无新DB。复用现有 analyze_risks + generate_contract。
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "请提供请求数据"}), 400
+
+    contract_type = data.get('type', '')
+    requirements = data.get('requirements', '')
+    buyer = data.get('buyer', '')
+    seller = data.get('seller', '')
+    export = data.get('export', False)
+    max_iterations = min(data.get('max_iterations', 2), 3)
+
+    if not contract_type or not requirements:
+        return jsonify({"error": "缺少 type 或 requirements"}), 400
+
+    history = []
+    feedback_text = ""
+    final_text = ""
+    final_docx = ""
+
+    for iteration in range(1, max_iterations + 1):
+        result = generate_contract(
+            contract_type, requirements, buyer, seller,
+            review_feedback=feedback_text, load_checklist=True
+        )
+        if "error" in result:
+            return jsonify(result), 500
+
+        gen_text = result["generated_text"]
+
+        # 审核：直接构造 parsed dict（在内存中，不走文件解析）
+        parsed = {
+            "raw_text": gen_text,
+            "clauses": _text_to_clauses(gen_text),
+            "word_count": len(gen_text),
+            "metadata": {"title": contract_type, "party_a": buyer, "party_b": seller},
+        }
+
+        report = analyze_risks(parsed, "通用")
+
+        # 提取反馈
+        feedback = extract_feedback(report)
+        total_issues = feedback.get("total_issues", 0)
+
+        history.append({
+            "iteration": iteration,
+            "word_count": len(gen_text),
+            "risk_summary": report.get("risk_summary", {}),
+            "overall_risk": report.get("overall_risk", "未知"),
+            "issues": feedback.get("issues", []),
+        })
+
+        if total_issues == 0 or iteration == max_iterations:
+            # 最终轮：积累避坑清单到持久化文件
+            checklist = build_avoidance_checklist(feedback)
+            append_checklist(checklist)
+
+            final_text = gen_text
+            if export:
+                final_docx = export_docx(final_text, contract_type)
+            break
+
+        # 下一轮注入反馈
+        feedback_text = build_feedback_prompt(feedback)
+
+    return jsonify({
+        "success": True,
+        "contract_type": contract_type,
+        "generated_text": final_text,
+        "word_count": len(final_text),
+        "history": history,
+        "iterations": len(history),
+        "docx_path": final_docx,
+        "disclaimer": "本合同时由AI审核-反馈-重新生成闭环生成，仅供参考。正式签署前请由专业律师审核。"
+    })
+
+
 @app.route('/api/download/<filename>')
 def download_file(filename):
-    safe_name = secure_filename(filename)
-    if not safe_name or safe_name != filename:
+    # 服务端生成的文件名含中文(如 服务合同_20260802.docx)，secure_filename会剥掉中文，
+    # 这里用_is_safe_filename校验：允许中文但拦截 ../ 路径穿越
+    if not _is_safe_filename(filename):
         return jsonify({"error": "非法文件名"}), 400
 
-    path = os.path.join(UPLOAD_DIR, safe_name)
+    path = os.path.join(UPLOAD_DIR, filename)
     real_upload = os.path.realpath(UPLOAD_DIR)
     real_path = os.path.realpath(path)
     if not real_path.startswith(real_upload + os.sep):
         return jsonify({"error": "非法文件路径"}), 400
 
     if os.path.exists(real_path):
-        return send_file(real_path, as_attachment=True, download_name=safe_name)
+        return send_file(real_path, as_attachment=True, download_name=filename)
     return jsonify({"error": "文件不存在"}), 404
 
 

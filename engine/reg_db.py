@@ -154,7 +154,8 @@ def search_regulations(query: str, industry: str = "", limit: int = 10) -> list:
                 "publish_date": r["publish_date"]
             })
     except sqlite3.OperationalError:
-        like_q = f"%{query.replace('%','\\%').replace('_','\\_')}%"
+        esc = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        like_q = '%' + esc + '%'
         rows = conn.execute("""
             SELECT id, title, category, industry, content, risk_tags, publish_date
             FROM regulations WHERE industry LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'
@@ -179,7 +180,15 @@ def list_regulations(industry: str = "") -> list:
             rows = conn.execute("SELECT * FROM regulations WHERE industry=? ORDER BY id DESC", (industry,)).fetchall()
         else:
             rows = conn.execute("SELECT * FROM regulations ORDER BY id DESC").fetchall()
-        return [dict(r) for r in rows]
+        results = []
+        for r in rows:
+            row = dict(r)
+            try:
+                row["tags"] = json.loads(row.get("risk_tags") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                row["tags"] = []
+            results.append(row)
+        return results
     finally:
         conn.close()
 
