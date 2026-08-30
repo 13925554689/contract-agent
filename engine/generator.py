@@ -29,8 +29,11 @@ def _append_checklist(text: str):
             existing = {line.strip() for line in open(_CHECKLIST_PATH, encoding="utf-8").readlines() if line.strip()}
         new_lines = [l.strip() for l in text.split("\n") if l.strip() and l.strip() not in existing]
         if new_lines:
-            with open(_CHECKLIST_PATH, "a", encoding="utf-8") as f:
-                f.write("\n".join(new_lines) + "\n")
+            # 有序去重: 保留文件原始顺序(最老在前)，滚动保留最近100条
+            all_lines = [l for l in open(_CHECKLIST_PATH, encoding="utf-8").read().splitlines() if l.strip()]
+            all_lines += new_lines
+            with open(_CHECKLIST_PATH, "w", encoding="utf-8") as f:
+                f.write("\n".join(all_lines[-100:]) + "\n")
     except OSError:
         pass
 
@@ -226,7 +229,8 @@ def export_docx(text: str, contract_type: str, output_path: str = "") -> str:
         output_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                                    'uploads', f'{contract_type}_{ts}.docx')
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if os.path.dirname(output_path):
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
     doc.save(output_path)
     return output_path
 

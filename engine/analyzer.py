@@ -48,9 +48,10 @@ def analyze_risks(parsed: dict, industry: str = "通用") -> dict:
     llm_risks = []
     if LLM_API_KEY:
         try:
-            llm_risks = _llm_analyze(text, industry, metadata)
-        except Exception:
-            pass
+            llm_risks = _llm_analyze(text, industry, metadata, related_regs)
+        except Exception as e:
+            # ponytail: LLM失败降级规则引擎，但必须留痕可诊断
+            print(f"[analyzer] LLM分析失败,降级规则引擎: {e}")
 
     all_risks = rule_risks + struct_risks + llm_risks
     all_risks = _deduplicate(all_risks)
@@ -135,25 +136,34 @@ def _find_relevant_regs(text: str, industry: str) -> list:
     return regs
 
 
-def _llm_analyze(text: str, industry: str, metadata: dict) -> list:
-    prompt = f"""你是资深合同审核专家。请分析以下{industry}行业合同，识别风险并给出修改建议。
+def _llm_analyze(text: str, industry: str, metadata: dict, related_regs: list) -> list:
+    reg_context = "\n".join(
+        f"- {r.get('title', '')}：{str(r.get('content', ''))[:200]}"
+        for r in (related_regs or [])
+    ) or "（法规库无匹配）"
+
+    prompt = f"""你是资深合同审核专家，仅适用中华人民共和国法律（不得引入美国法概念如完整协议/可分割性条款）。请分析以下{industry}行业合同，识别风险并给出修改建议。
 
 合同信息：
 - 甲乙方：{metadata.get('party_a','未知')} / {metadata.get('party_b','未知')}
 - 金额：{metadata.get('contract_amount','未知')}
 
-合同内容（前3000字）：
-{text[:3000]}
+可引用的法规库（reason字段只能引用以下法规，不得虚构法条；库中无依据的须在reason末尾标注[待核实]）：
+{reg_context}
 
-请以JSON数组输出风险点（最多8条），格式：
-[{{"level":"高风险/中风险/低风险/提示","name":"风险名称","description":"风险说明","suggestion":"修改建议","reason":"法律依据"}}]
+合同内容（前6000字）：
+{text[:6000]}
 
-只输出JSON，不要其他文字。如果没有风险返回[]。"""
+请以JSON对象输出风险点（最多8条），格式：
+{{"risks": [{{"level":"高风险/中风险/低风险/提示","name":"风险名称","description":"风险说明","suggestion":"修改建议","reason":"法律依据"}}]}}
+
+只输出JSON。如果没有风险返回 {{"risks": []}}。"""
 
     data = json.dumps({
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3, "max_tokens": 2000
+        "temperature": 0.3, "max_tokens": 2000,
+        "response_format": {"type": "json_object"}
     }).encode()
 
     req = urllib.request.Request(
@@ -166,7 +176,28 @@ def _llm_analyze(text: str, industry: str, metadata: dict) -> list:
         with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read())
             content = result["choices"][0]["message"]["content"]
-    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, KeyError, TimeoutError):
+    except urllib.error.HTTPError as e:
+        # ponytail: 部分OpenAI兼容端点不支持response_format→去掉重试一次
+        if e.code == 400:
+            try:
+                data2 = json.loads(data)
+                data2.pop("response_format", None)
+                req2 = urllib.request.Request(
+                    f"{LLM_BASE_URL.rstrip('/')}/chat/completions",
+                    data=json.dumps(data2).encode(),
+                    headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req2, timeout=60) as resp:
+                    content = json.loads(resp.read())["choices"][0]["message"]["content"]
+                print("[analyzer] 端点不支持json模式,已降级为普通模式")
+            except Exception as e2:
+                print(f"[analyzer] LLM调用失败: {e2}")
+                return []
+        else:
+            print(f"[analyzer] LLM HTTP错误: {e.code}")
+            return []
+    except (urllib.error.URLError, json.JSONDecodeError, KeyError, TimeoutError) as e:
+        print(f"[analyzer] LLM调用失败: {e}")
         return []
 
     content = content.strip()
@@ -179,17 +210,20 @@ def _llm_analyze(text: str, industry: str, metadata: dict) -> list:
         content = "\n".join(lines)
 
     try:
-        llm_risks = json.loads(content)
+        parsed = json.loads(content)
     except json.JSONDecodeError:
-        json_match = re.search(r'\[.*\]', content, re.DOTALL)
+        parsed = None
+        json_match = re.search(r'\{.*\}|\[.*\]', content, re.DOTALL)
         if json_match:
             try:
-                llm_risks = json.loads(json_match.group())
+                parsed = json.loads(json_match.group())
             except json.JSONDecodeError:
                 return []
-        else:
-            return []
 
+    # 兼容两种形态: {"risks": [...]} (json模式) / [...] (降级正则提取)
+    if isinstance(parsed, dict):
+        parsed = parsed.get("risks", [])
+    llm_risks = parsed
     if not isinstance(llm_risks, list):
         return []
 

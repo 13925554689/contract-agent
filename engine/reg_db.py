@@ -135,39 +135,49 @@ def seed_regulations():
         conn.close()
 
 
+def _like_search(conn, query: str, limit: int) -> list:
+    esc = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    like_q = '%' + esc + '%'
+    rows = conn.execute("""
+        SELECT id, title, category, industry, content, risk_tags, publish_date
+        FROM regulations WHERE industry LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'
+        ORDER BY id DESC LIMIT ?
+    """, (like_q, like_q, like_q, limit)).fetchall()
+    results = []
+    for r in rows:
+        results.append({
+            "id": r["id"], "title": r["title"], "category": r["category"],
+            "industry": r["industry"], "content": r["content"][:500],
+            "tags": json.loads(r["risk_tags"]), "snippet": r["content"][:200],
+            "publish_date": r["publish_date"]
+        })
+    return results
+
+
 def search_regulations(query: str, industry: str = "", limit: int = 10) -> list:
     conn = get_db()
     results = []
     try:
         safe_query = _escape_fts_query(query)
-        rows = conn.execute("""
-            SELECT id, title, category, industry, content, risk_tags, publish_date,
-                   snippet(reg_fts, 2, '<mark>', '</mark>', '...', 40) as snippet
-            FROM reg_fts WHERE reg_fts MATCH ? ORDER BY rank LIMIT ?
-        """, (safe_query, limit)).fetchall()
+        if safe_query:
+            rows = conn.execute("""
+                SELECT id, title, category, industry, content, risk_tags, publish_date,
+                       snippet(reg_fts, 2, '<mark>', '</mark>', '...', 40) as snippet
+                FROM reg_fts WHERE reg_fts MATCH ? ORDER BY rank LIMIT ?
+            """, (safe_query, limit)).fetchall()
 
-        for r in rows:
-            results.append({
-                "id": r["id"], "title": r["title"], "category": r["category"],
-                "industry": r["industry"], "content": r["content"][:500],
-                "tags": json.loads(r["risk_tags"]), "snippet": r["snippet"],
-                "publish_date": r["publish_date"]
-            })
+            for r in rows:
+                results.append({
+                    "id": r["id"], "title": r["title"], "category": r["category"],
+                    "industry": r["industry"], "content": r["content"][:500],
+                    "tags": json.loads(r["risk_tags"]), "snippet": r["snippet"],
+                    "publish_date": r["publish_date"]
+                })
+        # FTS零命中或无有效token时降级LIKE（unicode61分词器对中文长词易漏，如"违约金"）
+        if not results:
+            results = _like_search(conn, query, limit)
     except sqlite3.OperationalError:
-        esc = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-        like_q = '%' + esc + '%'
-        rows = conn.execute("""
-            SELECT id, title, category, industry, content, risk_tags, publish_date
-            FROM regulations WHERE industry LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'
-            ORDER BY id DESC LIMIT ?
-        """, (like_q, like_q, like_q, limit)).fetchall()
-        for r in rows:
-            results.append({
-                "id": r["id"], "title": r["title"], "category": r["category"],
-                "industry": r["industry"], "content": r["content"][:500],
-                "tags": json.loads(r["risk_tags"]), "snippet": r["content"][:200],
-                "publish_date": r["publish_date"]
-            })
+        results = _like_search(conn, query, limit)
     finally:
         conn.close()
     return results
