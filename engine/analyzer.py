@@ -1,10 +1,19 @@
 """风险分析引擎 - 规则库 + LLM混合判断"""
 import re
 import json
+import hashlib
 import urllib.request
 import urllib.error
-from engine.reg_db import search_regulations
+from engine.reg_db import search_regulations, search_cases
 from config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+
+_CACHE = {}  # ponytail: 进程内报告缓存(同文本+同参数免重复LLM计费)，重启清空；满了直接清
+
+_POSITION_GUIDE = {
+    "甲方": "我方为甲方（付款/采购/发包方）：重点防范付款后无法获得合格交付、验收标准缺失、质保与售后不足；对付款节奏、验收条件、质保条款从严把关，争取对我方有利的管辖与争议解决安排。",
+    "乙方": "我方为乙方（交付/销售/承包方）：重点防范回款拖延、验收标准模糊导致无限返工、赔偿责任无上限；对付款节点、验收期限、责任上限从严把关。",
+    "中立": "中立立场：不偏向任何一方，识别显失公平、权责不对等的条款。",
+}
 
 _RISK_RULES = [
     (r'违约金.*?(?<!不)(?<!得)(?:超过|高于|超出).*?(?:[总總].*?[金金额]|[合約约].*?[价價].*?款).*?(\d+)\s*%', '高风险', '违约金比例过高',
@@ -36,10 +45,20 @@ _RISK_RULES = [
 ]
 
 
-def analyze_risks(parsed: dict, industry: str = "通用") -> dict:
+def analyze_risks(parsed: dict, industry: str = "通用", position: str = "中立") -> dict:
     text = parsed["raw_text"]
     clauses = parsed["clauses"]
     metadata = parsed["metadata"]
+
+    position = position if position in _POSITION_GUIDE else "中立"
+
+    # ponytail: 报告缓存 key=内容哈希+参数，同合同重复审核秒回且省LLM费
+    # (key必须在position归一化之后算，否则非法position会生成与中立内容相同但键不同的冗余条目)
+    cache_key = hashlib.sha256(
+        (text + "|" + industry + "|" + position).encode("utf-8")
+    ).hexdigest()
+    if cache_key in _CACHE:
+        return _CACHE[cache_key]
 
     rule_risks = _match_rules(text, clauses)
     struct_risks = _check_structure(clauses)
@@ -48,7 +67,7 @@ def analyze_risks(parsed: dict, industry: str = "通用") -> dict:
     llm_risks = []
     if LLM_API_KEY:
         try:
-            llm_risks = _llm_analyze(text, industry, metadata, related_regs)
+            llm_risks = _llm_analyze(text, industry, metadata, related_regs, position)
         except Exception as e:
             # ponytail: LLM失败降级规则引擎，但必须留痕可诊断
             print(f"[analyzer] LLM分析失败,降级规则引擎: {e}")
@@ -63,16 +82,27 @@ def analyze_risks(parsed: dict, industry: str = "通用") -> dict:
 
     suggestions = _generate_suggestions(all_risks)
 
-    return {
+    # 判例要点：按命中风险名关联（不足时补全量前3条）
+    case_hits = search_cases([r["name"] for r in all_risks], limit=5)
+    if not case_hits:
+        case_hits = search_cases(None, limit=3)
+    report = {
         "contract_info": metadata,
         "industry": industry,
+        "position": position,
         "risk_summary": {"total": len(all_risks), "high": high, "mid": mid, "low": low, "tip": tips},
         "risks": all_risks,
         "suggestions": suggestions,
+        "negotiation_points": _generate_negotiation_points(all_risks),
         "related_regulations": related_regs,
+        "related_cases": case_hits,
         "overall_risk": "高风险" if high > 2 else ("中风险" if high > 0 or mid > 3 else "低风险"),
         "analyzed_by": "LLM+规则引擎" if llm_risks else "规则引擎"
     }
+    if len(_CACHE) >= 100:
+        _CACHE.clear()
+    _CACHE[cache_key] = report
+    return report
 
 
 def _match_rules(text: str, clauses: list) -> list:
@@ -136,13 +166,15 @@ def _find_relevant_regs(text: str, industry: str) -> list:
     return regs
 
 
-def _llm_analyze(text: str, industry: str, metadata: dict, related_regs: list) -> list:
+def _llm_analyze(text: str, industry: str, metadata: dict, related_regs: list, position: str = "中立") -> list:
     reg_context = "\n".join(
         f"- {r.get('title', '')}：{str(r.get('content', ''))[:200]}"
         for r in (related_regs or [])
     ) or "（法规库无匹配）"
 
     prompt = f"""你是资深合同审核专家，仅适用中华人民共和国法律（不得引入美国法概念如完整协议/可分割性条款）。请分析以下{industry}行业合同，识别风险并给出修改建议。
+
+{_POSITION_GUIDE.get(position, _POSITION_GUIDE['中立'])}
 
 合同信息：
 - 甲乙方：{metadata.get('party_a','未知')} / {metadata.get('party_b','未知')}
@@ -259,6 +291,34 @@ def _generate_suggestions(risks: list) -> list:
         suggestions.append("合同整体风险可控，建议关注提示项")
 
     return suggestions
+
+
+def _generate_negotiation_points(risks: list) -> list:
+    """每个风险生成一句可直接使用的谈判话术（对标 lumos 合同审查skill）"""
+    templates = {
+        "违约金比例过高": "关于违约金条款：我方理解需要违约约束，但当前上限明显超出实际损失预期，建议调整为合同总金额的20%以内，或按实际损失据实计算。",
+        "赔偿责任无限制": "关于赔偿责任范围：'一切损失'的表述双方都无法预估风险敞口，建议改为'以本合同总金额为限，且不包括间接损失和预期利益损失'。",
+        "责任免除过宽": "关于免责条款：完全免除一方责任显失公平，也不会得到法院支持，建议双方各让一步，仅免除一般过失情形。",
+        "付款周期过长": "关于付款周期：当前账期超出《保障中小企业款项支付条例》60日上限，建议改为验收合格后30日内支付。",
+        "保密期限无限制": "关于保密期限：无限期保密义务对双方都是负担，建议改为合同终止后3年内有效，商业秘密除外。",
+        "管辖地不利于我方": "关于争议管辖：在对方所在地诉讼我方维权成本过高，建议改为我方所在地法院，或折中约定合同签订地/仲裁。",
+        "单方任意解除权": "关于解除权：当前仅一方可随时解除而另一方被动，建议改为双方均可提前30日书面通知解除，且需补偿对方已投入成本。",
+        "知识产权归属不利": "关于知识产权：我方投入了主要开发/创作成本，建议改为双方共有，或我方保留背景知识产权并授权对方使用。",
+        "赔偿责任上限低": "关于赔偿上限：当前上限无法覆盖我方实际投入，建议至少提高到合同总金额，重大过失除外。",
+        "试用期过长": "关于试用期：6个月上限需以3年以上固定期限合同为前提，且试用期工资不得低于转正的80%，建议调整期限并同步调薪。",
+        "竞业限制期限": "关于竞业限制：2年为法定上限，且期间须按月支付补偿金，请确认补偿标准已写入条款。",
+        "口头协议风险": "关于合同形式：建议补充'本合同的变更与补充均须以书面形式作出，口头约定无效'条款。",
+        "仅约定仲裁": "关于争议解决：仅约定仲裁排除了诉讼救济，请确认仲裁机构名称准确唯一，或改为'或裁或审'由我方选择。",
+        "付款与验收脱钩": "关于付款与验收：建议将付款节点与验收里程碑绑定，验收合格作为付款前提，保护双方权益。",
+    }
+    points = []
+    for r in risks:
+        if r["level"] == "提示":
+            continue
+        tpl = templates.get(r["name"])
+        if tpl:
+            points.append(tpl)
+    return points
 
 
 def _get_remedy(risk_name: str) -> str:

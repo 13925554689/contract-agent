@@ -4,11 +4,12 @@ import re
 import json
 import time
 import glob
+import difflib
 from flask import Flask, request, jsonify, render_template, send_file
 from werkzeug.utils import secure_filename
 
 from config import UPLOAD_DIR, INDUSTRIES, CONTRACT_TYPES
-from engine.reg_db import init_db, seed_regulations, search_regulations, list_regulations
+from engine.reg_db import init_db, seed_regulations, seed_cases, search_regulations, list_regulations, search_cases
 from engine.parser import parse_contract
 from engine.analyzer import analyze_risks
 from engine.generator import generate_contract, export_docx, append_checklist
@@ -28,6 +29,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 init_db()
 seed_regulations()
+seed_cases()
 
 
 def _is_safe_filename(filename):
@@ -89,24 +91,13 @@ def review_contract():
         return jsonify({"error": "不支持的文件格式，仅允许 PDF/DOCX/TXT"}), 400
 
     industry = request.form.get('industry', '通用')
+    position = request.form.get('position', '中立')
 
-    safe_name = secure_filename(file.filename)
-    if not safe_name:
-        safe_name = f"{int(time.time())}.txt"
-    else:
-        safe_name = f"{int(time.time())}_{safe_name}"
-    filepath = os.path.join(UPLOAD_DIR, safe_name)
-
-    real_upload = os.path.realpath(UPLOAD_DIR)
-    real_filepath = os.path.realpath(filepath)
-    if not real_filepath.startswith(real_upload + os.sep) and real_filepath != real_upload:
-        return jsonify({"error": "非法文件路径"}), 400
-
-    file.save(filepath)
+    filepath, _ = _save_uploaded_file(file)
 
     try:
         parsed = parse_contract(filepath)
-        report = analyze_risks(parsed, industry)
+        report = analyze_risks(parsed, industry, position)
         return jsonify({"success": True, "report": report, "filename": file.filename})
 
     except Exception as e:
@@ -116,6 +107,89 @@ def review_contract():
             os.remove(filepath)
         except OSError:
             pass
+
+
+def _save_uploaded_file(file) -> tuple:
+    """保存上传文件到UPLOAD_DIR，返回(绝对路径, 原文件名)；非法时抛ValueError"""
+    safe_name = secure_filename(file.filename)
+    if not safe_name:
+        safe_name = f"{time.time_ns()}.txt"
+    else:
+        # ponytail: time_ns防同名同秒覆盖(compare两端同名文件曾互吞)，前缀唯一即可
+        safe_name = f"{time.time_ns()}_{safe_name}"
+    filepath = os.path.join(UPLOAD_DIR, safe_name)
+    real_upload = os.path.realpath(UPLOAD_DIR)
+    real_filepath = os.path.realpath(filepath)
+    if not real_filepath.startswith(real_upload + os.sep) and real_filepath != real_upload:
+        raise ValueError("非法文件路径")
+    file.save(filepath)
+    return filepath, file.filename
+
+
+@app.route('/api/compare', methods=['POST'])
+def compare_contracts():
+    """两版合同差异对比（对标电子签contract-comparison）：
+    上传 old/new 两个文件 → difflib 逐段对比 → 增/删/改清单 + 变更摘要
+    """
+    if 'old' not in request.files or 'new' not in request.files:
+        return jsonify({"error": "请上传 old 和 new 两个合同文件"}), 400
+    for f in (request.files['old'], request.files['new']):
+        if not _allowed_file(f.filename):
+            return jsonify({"error": "不支持的文件格式，仅允许 PDF/DOCX/TXT"}), 400
+
+    saved = []
+    try:
+        for key in ('old', 'new'):
+            fp, _ = _save_uploaded_file(request.files[key])
+            saved.append(fp)
+        old_text = parse_contract(saved[0])["raw_text"]
+        new_text = parse_contract(saved[1])["raw_text"]
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"文件解析失败: {e}"}), 500
+    finally:
+        for fp in saved:
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+
+    old_lines = [l for l in old_text.splitlines() if l.strip()]
+    new_lines = [l for l in new_text.splitlines() if l.strip()]
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+
+    changes = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            continue
+        if tag == 'delete':
+            for line in old_lines[i1:i2]:
+                changes.append({"type": "删除", "old": line, "new": ""})
+        elif tag == 'insert':
+            for line in new_lines[j1:j2]:
+                changes.append({"type": "新增", "old": "", "new": line})
+        else:  # replace
+            changes.append({
+                "type": "修改",
+                "old": "\n".join(old_lines[i1:i2]),
+                "new": "\n".join(new_lines[j1:j2]),
+            })
+
+    return jsonify({
+        "success": True,
+        "summary": {
+            "added": sum(1 for c in changes if c["type"] == "新增"),
+            "deleted": sum(1 for c in changes if c["type"] == "删除"),
+            "modified": sum(1 for c in changes if c["type"] == "修改"),
+            "old_length": len(old_text),
+            "new_length": len(new_text),
+            "changed": len(changes) > 0,
+        },
+        "changes": changes,
+        "old_filename": request.files['old'].filename,
+        "new_filename": request.files['new'].filename,
+    })
 
 
 @app.route('/api/generate', methods=['POST'])
@@ -191,7 +265,7 @@ def generate_and_review():
             "metadata": {"title": contract_type, "party_a": buyer, "party_b": seller},
         }
 
-        report = analyze_risks(parsed, "通用")
+        report = analyze_risks(parsed, "通用", data.get('position', '中立'))
 
         # 提取反馈
         feedback = extract_feedback(report)
@@ -270,7 +344,17 @@ def list_regs():
 def refresh_regs():
     init_db()
     seed_regulations()
+    seed_cases()
     return jsonify({"success": True, "message": "法规库已刷新", "reg_count": len(list_regulations())})
+
+
+@app.route('/api/cases')
+def get_cases():
+    """判例要点检索（对标 法眼faya 判例库）：?risk=风险名1,风险名2 或全量"""
+    risk_param = request.args.get('risk', '')
+    risk_names = [r.strip() for r in risk_param.split(',') if r.strip()] if risk_param else None
+    cases = search_cases(risk_names)
+    return jsonify({"success": True, "results": cases, "count": len(cases)})
 
 
 @app.route('/api/health')

@@ -1,0 +1,11 @@
+{
+  "name": "合同生成和审核智能体",
+  "kind": "flask",
+  "bootstrap": [],
+  "build": [],
+  "test": [".venv\\Scripts\\python.exe test_api.py"],
+  "start": [".venv\\Scripts\\python.exe app.py"],
+  "port": 5198,
+  "readinessPath": "/api/health",
+  "notes": "test_api.py 需要服务先起在5198；start 先行，test 阶段直接打 127.0.0.1:5198。verify用cmd shell，路径须反斜杠"
+}

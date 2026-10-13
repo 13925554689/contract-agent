@@ -95,6 +95,54 @@ check("generate missing type ->400", s == 400)
 s, d = call("POST", "/api/cleanup")
 check("cleanup", s == 200 and d.get("success"))
 
+# 13. 合同对比：new版增加一条条款+修改一条
+old_txt = "第一条 甲方应支付货款10万元。\n第二条 交货期为30天。\n第三条 违约金为合同总额的30%。"
+new_txt = "第一条 甲方应支付货款12万元。\n第二条 交货期为30天。\n第三条 违约金为合同总额的20%。\n第四条 双方应保守商业秘密。"
+def multipart_two(f1, c1, f2, c2):
+    b = (f"--BOUNDARY\r\nContent-Disposition: form-data; name=\"old\"; filename=\"{f1}\"\r\n"
+         f"Content-Type: text/plain\r\n\r\n").encode("utf-8") + c1.encode("utf-8")
+    b += (f"\r\n--BOUNDARY\r\nContent-Disposition: form-data; name=\"new\"; filename=\"{f2}\"\r\n"
+          f"Content-Type: text/plain\r\n\r\n").encode("utf-8") + c2.encode("utf-8")
+    return b + b"\r\n--BOUNDARY--\r\n"
+s, d = call("POST", "/api/compare", multipart_two("old.txt", old_txt, "new.txt", new_txt), is_json=False)
+check("compare diff", s == 200 and d.get("success") and d["summary"]["changed"] is True
+      and len(d["changes"]) >= 2
+      and "12万元" in "".join(c["new"] for c in d["changes"]),
+      f"s={d.get('summary')}")
+s, d = call("POST", "/api/compare", multipart_two("a.txt", old_txt, "b.txt", old_txt), is_json=False)
+check("compare identical", s == 200 and d["summary"]["changed"] is False, f"s={d.get('summary')}")
+
+# 14. 判例要点检索
+s, d = call("GET", "/api/cases")
+check("cases list", s == 200 and d.get("count", 0) >= 5, f"count={d.get('count')}")
+s, d = call("GET", "/api/cases?risk=" + urllib.request.quote("违约金比例过高"))
+check("cases by risk", s == 200 and d.get("count", 0) >= 1
+      and d["results"][0]["risk_name"] == "违约金比例过高", f"count={d.get('count')}")
+
+# 15. 审核立场参数（甲方立场审核同一份合同）
+body3 = ("--BOUNDARY\r\nContent-Disposition: form-data; name=\"industry\"\r\n\r\n通用\r\n"
+         "--BOUNDARY\r\nContent-Disposition: form-data; name=\"position\"\r\n\r\n甲方\r\n"
+         "--BOUNDARY\r\nContent-Disposition: form-data; name=\"file\"; filename=\"test_contract.txt\"\r\n"
+         "Content-Type: text/plain\r\n\r\n").encode("utf-8")
+body3 += io.open("test_contract.txt", "rb").read() + b"\r\n--BOUNDARY--\r\n"
+s, d = call("POST", "/api/review", body3, is_json=False)
+report15 = d.get("report", {})
+check("review with position", s == 200 and report15.get("position") == "甲方"
+      and "negotiation_points" in report15, f"pos={report15.get('position')}")
+# L4-R1 回归: 谈判话术不得含未填充占位符
+check("negotiation no placeholders", all("{" not in p for p in report15.get("negotiation_points", [])),
+      f"pts={report15.get('negotiation_points', [])[:1]}")
+
+# 16. L4-R2 回归: compare 两端同名文件不得互吞
+same_name = ("--BOUNDARY\r\nContent-Disposition: form-data; name=\"old\"; filename=\"v.txt\"\r\n"
+             "Content-Type: text/plain\r\n\r\n甲方向乙方支付10万元。\r\n"
+             "--BOUNDARY\r\nContent-Disposition: form-data; name=\"new\"; filename=\"v.txt\"\r\n"
+             "Content-Type: text/plain\r\n\r\n甲方向乙方支付20万元。\r\n"
+             "--BOUNDARY--\r\n").encode("utf-8")
+s, d = call("POST", "/api/compare", same_name, is_json=False)
+check("compare same-name files", s == 200 and d["summary"]["changed"] is True
+      and "20万元" in "".join(c["new"] for c in d["changes"]), f"s={d.get('summary')}")
+
 fails = [r for r in results if not r[1]]
 print(f"\n===== {len(results) - len(fails)}/{len(results)} PASSED =====")
 for name, ok, det in fails:

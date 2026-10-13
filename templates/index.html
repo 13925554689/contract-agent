@@ -102,6 +102,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 <div class="tabs">
   <button class="tab active" onclick="switchTab('review')">🔍 合同审核</button>
   <button class="tab" onclick="switchTab('generate')">✍️ 合同生成</button>
+  <button class="tab" onclick="switchTab('compare')">📄 合同对比</button>
   <button class="tab" onclick="switchTab('regulations')">📚 法规库</button>
 </div>
 
@@ -127,6 +128,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
             {% endfor %}
           </select>
         </div>
+        <div class="form-group">
+          <label>审查立场</label>
+          <select id="position">
+            <option value="中立" selected>中立</option>
+            <option value="甲方">甲方（我方付款/采购）</option>
+            <option value="乙方">乙方（我方交付/销售）</option>
+          </select>
+        </div>
         <button class="btn btn-primary" onclick="reviewContract()" style="width:100%">
           🔍 开始审核
         </button>
@@ -148,7 +157,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
     </div>
     <div class="card"><h3>风险详情</h3><div id="riskList"></div></div>
     <div class="card"><h3>修改建议</h3><div id="suggestions"></div></div>
+    <div class="card"><h3>谈判要点</h3><div id="negotiationPoints"></div></div>
     <div class="card"><h3>相关法规</h3><div id="relatedRegs"></div></div>
+    <div class="card"><h3>类似判例</h3><div id="relatedCases"></div></div>
     <div class="card">
       <button class="btn btn-outline btn-sm" onclick="exportReport()">📥 导出报告</button>
     </div>
@@ -202,6 +213,32 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
   </div>
 </div>
 
+<div class="panel" id="panel-compare">
+  <div class="card">
+    <h3>两版合同对比</h3>
+    <div class="row">
+      <div class="form-group">
+        <label>原版合同（old）</label>
+        <input type="file" id="cmpOld" accept=".pdf,.docx,.doc,.txt">
+      </div>
+      <div class="form-group">
+        <label>新版合同（new）</label>
+        <input type="file" id="cmpNew" accept=".pdf,.docx,.doc,.txt">
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="compareContracts()">📄 开始对比</button>
+  </div>
+  <div class="loading" id="cmpLoading"><div class="spinner"></div><p>正在对比...</p></div>
+  <div class="msg" id="cmpMsg"></div>
+  <div class="result" id="cmpResult">
+    <div class="card">
+      <h3>变更摘要</h3>
+      <div class="risk-bar" id="cmpBar"></div>
+    </div>
+    <div class="card"><h3>差异明细</h3><div id="cmpChanges"></div></div>
+  </div>
+</div>
+
 <div class="panel" id="panel-regulations">
   <div class="card">
     <h3>法规检索</h3>
@@ -227,7 +264,7 @@ function escapeHtml(str) {
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.textContent.includes(
-    name==='review'?'审核':name==='generate'?'生成':'法规')));
+    name==='review'?'审核':name==='generate'?'生成':name==='compare'?'对比':'法规')));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
 }
@@ -263,6 +300,7 @@ async function reviewContract() {
   const form = new FormData();
   form.append('file', file);
   form.append('industry', document.getElementById('industry').value);
+  form.append('position', document.getElementById('position').value);
 
   try {
     const resp = await fetch('/api/review', {method:'POST', body:form});
@@ -381,6 +419,45 @@ function renderReport(report) {
   } else {
     regsEl.innerHTML = '<p style="color:#999">未找到相关法规</p>';
   }
+
+  const negEl = document.getElementById('negotiationPoints');
+  negEl.innerHTML = '';
+  if (report.negotiation_points && report.negotiation_points.length > 0) {
+    const ul = document.createElement('ul');
+    ul.className = 'suggestions';
+    report.negotiation_points.forEach(s => {
+      const li = document.createElement('li');
+      li.textContent = s;
+      ul.appendChild(li);
+    });
+    negEl.appendChild(ul);
+  } else {
+    negEl.innerHTML = '<p style="color:#999">无谈判要点</p>';
+  }
+
+  const casesEl = document.getElementById('relatedCases');
+  casesEl.innerHTML = '';
+  if (report.related_cases && report.related_cases.length > 0) {
+    report.related_cases.forEach(c => {
+      const div = document.createElement('div');
+      div.className = 'reg-card';
+      const titleEl = document.createElement('div');
+      titleEl.className = 'rtitle';
+      titleEl.textContent = '⚖️ ' + c.title;
+      div.appendChild(titleEl);
+      const holdingEl = document.createElement('div');
+      holdingEl.style.cssText = 'font-size:13px;color:#666;margin:6px 0';
+      holdingEl.textContent = c.holding;
+      div.appendChild(holdingEl);
+      const tagEl = document.createElement('span');
+      tagEl.className = 'tag warn';
+      tagEl.textContent = '关联风险: ' + c.risk_name;
+      div.appendChild(tagEl);
+      casesEl.appendChild(div);
+    });
+  } else {
+    casesEl.innerHTML = '<p style="color:#999">未找到类似判例</p>';
+  }
 }
 
 async function generateContract(exportDocx=false) {
@@ -471,6 +548,74 @@ async function generateAndReview() {
   } catch(e) {
     showLoading('genLoading', false);
     showMsg('genMsg','error','❌ ' + e.message);
+  }
+}
+
+async function compareContracts() {
+  const oldF = document.getElementById('cmpOld').files[0];
+  const newF = document.getElementById('cmpNew').files[0];
+  if (!oldF || !newF) return showMsg('cmpMsg','error','请选择原版和新版两个合同文件');
+
+  showLoading('cmpLoading', true);
+  hideResult('cmpResult');
+  hideMsg('cmpMsg');
+
+  const form = new FormData();
+  form.append('old', oldF);
+  form.append('new', newF);
+
+  try {
+    const resp = await fetch('/api/compare', {method:'POST', body:form});
+    const data = await resp.json();
+    showLoading('cmpLoading', false);
+    if (!resp.ok) throw new Error(data.error || '对比失败');
+
+    const s = data.summary;
+    const barEl = document.getElementById('cmpBar');
+    barEl.innerHTML =
+      '<div class="risk-stat"><div class="num">'+Number(s.added)+'</div><div class="lbl">新增</div></div>' +
+      '<div class="risk-stat mid"><div class="num">'+Number(s.modified)+'</div><div class="lbl">修改</div></div>' +
+      '<div class="risk-stat high"><div class="num">'+Number(s.deleted)+'</div><div class="lbl">删除</div></div>';
+
+    const chEl = document.getElementById('cmpChanges');
+    chEl.innerHTML = '';
+    if (data.changes.length === 0) {
+      const p = document.createElement('p');
+      p.style.color = '#999';
+      p.textContent = '两版合同内容一致，无差异';
+      chEl.appendChild(p);
+    } else {
+      data.changes.forEach(c => {
+        const div = document.createElement('div');
+        const color = c.type==='新增' ? 'var(--ok)' : c.type==='删除' ? 'var(--danger)' : 'var(--warn)';
+        div.className = 'risk-item';
+        div.style.borderLeft = '4px solid ' + color;
+        const t = document.createElement('div');
+        t.className = 'rname';
+        t.textContent = c.type;
+        div.appendChild(t);
+        if (c.old) {
+          const o = document.createElement('div');
+          o.className = 'rdesc';
+          o.style.cssText = 'background:#fff5f5;padding:6px;border-radius:4px;white-space:pre-wrap';
+          o.textContent = '－ ' + c.old;
+          div.appendChild(o);
+        }
+        if (c.new) {
+          const n = document.createElement('div');
+          n.className = 'rdesc';
+          n.style.cssText = 'background:#f0fff4;padding:6px;border-radius:4px;white-space:pre-wrap;margin-top:4px';
+          n.textContent = '＋ ' + c.new;
+          div.appendChild(n);
+        }
+        chEl.appendChild(div);
+      });
+    }
+    showResult('cmpResult');
+    showMsg('cmpMsg','success','✅ 对比完成：新增'+s.added+' 修改'+s.modified+' 删除'+s.deleted);
+  } catch(e) {
+    showLoading('cmpLoading', false);
+    showMsg('cmpMsg','error','❌ ' + e.message);
   }
 }
 

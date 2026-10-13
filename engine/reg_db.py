@@ -56,6 +56,19 @@ def init_db():
                 INSERT INTO reg_fts(rowid, title, content, industry, category, search_text)
                 VALUES (new.id, new.title, new.content, new.industry, new.category, new.search_text);
             END;
+            CREATE TABLE IF NOT EXISTS cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                risk_name TEXT NOT NULL,
+                holding TEXT NOT NULL,
+                keywords TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TRIGGER IF NOT EXISTS cases_au AFTER UPDATE ON cases BEGIN
+                UPDATE cases SET keywords = keywords WHERE id = new.id;
+            END;
+            -- ponytail: 无cases_fts——search_cases走risk_name IN精确匹配(参数化)，FTS无人查询属半成品已删；
+            -- cases_au占位触发器仅为schema完整性，UPDATE场景当前不存在，若未来加UPDATE入口先改这里
         """)
         conn.commit()
     finally:
@@ -135,6 +148,42 @@ def seed_regulations():
         conn.close()
 
 
+def seed_cases():
+    """判例要点库 seed（对标 法眼faya 四重知识库的判例层），独立于法规seed"""
+    conn = get_db()
+    try:
+        if conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0] > 0:
+            return
+        case_seeds = [
+            ("某建材公司诉某建设集团买卖合同纠纷案", "违约金比例过高",
+             "约定按日千分之五支付违约金，法院认为过分高于实际损失，参照民法典585条酌情调整为按LPR上浮50%计算。",
+             "违约金 过高 调整 民法典585"),
+            ("某软件公司诉某制造企业技术服务合同纠纷案", "付款周期过长",
+             "约定验收后180日付款，法院认定付款期限约定过长且未约定逾期利息，判令按LPR支付逾期付款损失。",
+             "付款周期 账期 逾期利息"),
+            ("某科技公司诉某贸易公司计算机软件开发合同纠纷案", "单方任意解除权",
+             "合同约定委托方有权随时解除且不担责，法院认定该条款排除对方主要权利，认定无效，解除方仍须赔偿已投入损失。",
+             "任意解除权 格式条款 无效"),
+            ("某设计院诉某地产公司建设工程设计合同纠纷案", "知识产权归属不利",
+             "约定设计成果知识产权全部归发包方且无对价补偿，法院支持设计方主张背景知识产权保留并要求追加许可费。",
+             "知识产权 归属 背景IP"),
+            ("某咨询公司诉某互联网公司保密协议纠纷案", "保密期限无限制",
+             "约定保密义务永久有效，法院认为针对一般商业信息的无限期保密不合理，酌定为信息公开后5年。",
+             "保密期限 永久 合理性"),
+            ("某劳务公司诉某物流公司劳务合同纠纷案", "管辖地不利于我方",
+             "约定争议由被告所在地法院管辖，原告维权成本过高，法院释明可协议选择原告所在地，双方调解变更管辖。",
+             "管辖 法院选择 维权成本"),
+        ]
+        for title, risk_name, holding, keywords in case_seeds:
+            conn.execute("""
+                INSERT INTO cases (title, risk_name, holding, keywords)
+                VALUES (?, ?, ?, ?)
+            """, (title, risk_name, holding, keywords))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _like_search(conn, query: str, limit: int) -> list:
     esc = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     like_q = '%' + esc + '%'
@@ -199,6 +248,23 @@ def list_regulations(industry: str = "") -> list:
                 row["tags"] = []
             results.append(row)
         return results
+    finally:
+        conn.close()
+
+
+def search_cases(risk_names: list[str] = None, limit: int = 5) -> list:
+    """按风险名称查判例要点；risk_names为空时返回全部"""
+    conn = get_db()
+    try:
+        if risk_names:
+            marks = ",".join("?" * len(risk_names))
+            rows = conn.execute(
+                f"SELECT title, risk_name, holding, keywords FROM cases WHERE risk_name IN ({marks}) LIMIT ?",
+                (*risk_names, limit)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT title, risk_name, holding, keywords FROM cases LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
